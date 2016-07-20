@@ -46,14 +46,14 @@ BACKGROUND_TXT = _('''\
 <h3>Opendime&trade; Helper Plugin</h3>
 <p>
 Makes setup, loading and spending from
-Opendime disposable hardware bitcoins even easier!
+Opendime disposable hardware bitcoins even easier.
 </p><p>
 Once this plugin is enabled:
 </p>
 <ul>
 <li> If you connect a sealed Opendime, the balance will be shown
      and you can send funds to it directly.
-<li> Funds from <b>unsealed</b> Opendime will be automatically sent to your wallet.
+<li> Funds from <b>unsealed</b> devices will be automatically sent to your wallet.
 <li> Fresh devices will be setup with good quality entropy.
 <li> Use the <b>Opendime</b> tab to do all this!
 </ul>
