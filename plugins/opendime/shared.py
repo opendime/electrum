@@ -3,6 +3,7 @@ from electrum.i18n import _
 from electrum.bitcoin import verify_message
 
 from base64 import b64decode, urlsafe_b64decode
+from hashlib import md5
 
 try:
     B2A = lambda x:x
@@ -305,8 +306,11 @@ class AttachedOpendime(object):
     def serial(self):
         if 'sn' in self.variables:
             return self.variables['sn'].strip()
+
         # New units don't report their serial numbers (yet!!). Make one.
-        return 'VVV'+str(id(self))
+        # This is on our list to fix in the next version of firmware.
+
+        return md5(self.root_path).hexdigest()
 
     @property
     def privkey(self):

@@ -41,7 +41,8 @@ from electrum_gui.qt.util import EnterButton, WindowModalDialog, Buttons, MONOSP
 from electrum_gui.qt.util import OkButton, CloseButton, MyTreeWidget, ThreadedButton
 from PyQt4.Qt import QVBoxLayout, QHBoxLayout, QWidget, QPixmap, QTreeWidgetItem, QIcon
 from PyQt4.Qt import QGridLayout, QPushButton, QCheckBox, QLabel, QMenu, QFont, QSize
-from PyQt4.Qt import QDesktopServices, QUrl
+from PyQt4.Qt import QDesktopServices, QUrl, QHeaderView, QFrame
+from PyQt4.QtCore import pyqtSignal
 from PyQt4.Qt import Qt
 from functools import partial
 from collections import OrderedDict
@@ -85,21 +86,23 @@ class OpendimeItem(QTreeWidgetItem):
 
         icon_name, status_text = self.display_status()
 
-        super(OpendimeItem, self).__init__([unit.address if not unit.is_new else '  -  ',
-                                status_text,
-                                'n/a' if unit.is_new else 'wait', '...'])
+        # resorting the text formatin ghere!
+        addr = '%-37s' % (unit.address if not unit.is_new else '  -  ')
+
+        super(OpendimeItem, self).__init__([status_text, addr,
+                                '' if unit.is_new else '?'])
 
         self.setChildIndicatorPolicy(QTreeWidgetItem.DontShowIndicator)
 
-        # address column
-        self.setFont(0, QFont(MONOSPACE_FONT))
-        self.setTextAlignment(0, Qt.AlignLeft)      # works, but there is a gap
-
         # status column
-        self.setIcon(1, QIcon(icon_name))       # XXX causes warning about threads.
+        self.setIcon(0, QIcon(icon_name))
+
+        # address column
+        self.setFont(1, QFont(MONOSPACE_FONT))
+        #self.setTextAlignment(1, Qt.AlignLeft)      # works, but there is a gap?
 
         # balance
-        self.setTextAlignment(2, Qt.AlignRight)      # balance
+        #self.setTextAlignment(2, Qt.AlignRight)      # balance
 
         # key value used for UID
         self.serial = unit.serial
@@ -123,6 +126,11 @@ class OpendimeItem(QTreeWidgetItem):
 
 
 class OpendimeTab(QWidget):
+
+    # signals for slotting
+    new_unit_sig = pyqtSignal(AttachedOpendime)
+    scan_done_sig = pyqtSignal(list)
+
     def __init__(self, wallet, main_window):
         '''
             Each open wallet may have an Opendime tab.
@@ -147,6 +155,10 @@ class OpendimeTab(QWidget):
         self.attached = OrderedDict()
 
         #if self.wallet.is_watching_only():
+
+        # connect slots
+        self.new_unit_sig.connect(self.new_unit_detected)
+        self.scan_done_sig.connect(self.scan_done_handler)
 
     def table_item_menu(self, position):
         item = self.table.itemAt(position)
@@ -174,7 +186,7 @@ class OpendimeTab(QWidget):
             menu.addSeparator()
 
         if unit.is_new:
-            menu.addAction(_("Pick key now"), lambda: self.setup_unit(unit))
+            menu.addAction(_("Pick key now (initialize)"), lambda: self.setup_unit(unit))
 
         else:
             addr = unit.address
@@ -187,14 +199,19 @@ class OpendimeTab(QWidget):
             app = QApplication.instance()
 
             if not unit.is_sealed:
-                menu.addAction(_("Import private key"), lambda: self.import_value(unit))
+                menu.addAction(_("Import private key into Electrum"),
+                                        lambda: self.import_value(unit))
                 menu.addAction(_("Sweep funds (one time)"), lambda: self.sweep_value(unit))
                 menu.addSeparator()
             else:
                 menu.addAction(_("Pay to..."), lambda: self.main_window.pay_to_URI('bitcoin:'+addr))
                 menu.addSeparator()
 
-            menu.addAction(_("Copy to clipboard"), 
+            # Maybe todo: could open as a new wallet; either watch-only or if unsealed,
+            # as a full wallet, see Wallet.from_address() and Wallet.from_private_key()
+            # Probably a bad idea and too obscure otherwise.
+
+            menu.addAction(_("Copy to address clipboard"), 
                                 lambda: app.clipboard().setText(unit.address))
 
             menu.addAction(_("Show as QR code"),
@@ -210,9 +227,9 @@ class OpendimeTab(QWidget):
                 menu.addAction(_("View on block explorer"), lambda: webbrowser.open(url))
 
             menu.addSeparator()
-            menu.addAction(_("View local HTML"), 
+            menu.addAction(_("View Opendime page (local HTML)"), 
                 lambda: webbrowser.open('file:'+os.path.join(unit.root_path, 'index.htm')))
-            menu.addAction(_("Open Opendime folder"), 
+            menu.addAction(_("Reveal Opendime files"), 
                 lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(unit.root_path)))
 
         menu.exec_(self.table.viewport().mapToGlobal(position))
@@ -221,9 +238,11 @@ class OpendimeTab(QWidget):
     def rescan_now(self):
         '''
             Slow task: look for units, update table and our state when found.
+            Runs in a non-GUI thread.
         '''
         try:
-            self.status_label.text = "Scanning now"
+            self.status_label.text = "Scanning now..."
+            self.status_label.update()
 
             # search for any and all units presently connected.
             paths = AttachedOpendime.find()
@@ -234,18 +253,12 @@ class OpendimeTab(QWidget):
 
             for pn in paths:
                 unit = AttachedOpendime(pn)
-                if unit.serial in self.attached:
-                    found.append(unit)
-                else:
+                found.append(unit)
+                if unit.serial not in self.attached:
                     new.append(unit)
                     unit.verify_wrapped()
 
-                    # add to gui and list
-                    item = OpendimeItem(unit)
-                    sn = unit.serial
-                    self.attached[sn] = item
-
-                    self.table.addChild(item)
+                    self.new_unit_sig.emit(unit)
 
             # remove missing ones
             msg = None
@@ -260,8 +273,32 @@ class OpendimeTab(QWidget):
                 msg = "No change: %d units" % len(self.attached)
 
             self.status_label.setText(msg)
+
+            self.scan_done_sig.emit([u.serial for u in found])
+
+
         except Exception, e:
             print str(e)
+
+
+    def new_unit_detected(self, unit):
+        '''
+            New opendime found, and was added to Q.
+        '''
+        # add to gui and list
+        item = OpendimeItem(unit)
+        sn = unit.serial
+        self.attached[sn] = item
+
+        self.table.addChild(item)
+
+    def scan_done_handler(self, found_serials):
+        '''
+            Scan of drives is complete, and we found those serial number.
+            Anything else in our list, is now disconnected.
+        '''
+        print found_serials
+
 
     def build_gui(self):
         '''
@@ -269,16 +306,29 @@ class OpendimeTab(QWidget):
         '''
 
         grid = QGridLayout(self)
-        grid.setSpacing(20)
+        grid.setSpacing(10)
         grid.setColumnStretch(3, 1)
 
-        logo = QLabel()
-        pix = QPixmap(':od-plugin/od-logo.png')
-        assert pix, "could not load logo"
-        logo.setPixmap(pix)
-        # addItem(QLayoutItem *item, row, column, rowSpan=1, columnSpan = 1, alignment = 0)
-        grid.addWidget(logo, 0, 0, 2, 1)
+        prod = QLabel()
+        prod.setPixmap(QPixmap(':od-plugin/prod-shot.png').scaledToWidth(300))
+        grid.addWidget(prod, 0, 0)
 
+        hp_link = QLabel('<center><a href="https://opendime.com/electrum">opendime.com</a>')
+        hp_link.openExternalLinks = True
+        grid.addWidget(hp_link, 1, 0)
+
+        #logo = QLabel()
+        #logo.setPixmap(QPixmap(':od-plugin/od-logo.png').scaledToWidth(100))
+        #grid.addWidget(logo, 1, 0, 1, 1)
+
+        frame = QFrame()
+        frame.setFrameStyle(QFrame.Box | QFrame.Plain)
+        vb = QVBoxLayout(frame)
+        self.details = vb
+        vb.addWidget(QLabel("testing 123"))
+        grid.addWidget(frame, 0, 2)
+
+        # addItem(QLayoutItem *item, row, column, rowSpan=1, columnSpan = 1, alignment = 0)
 
         # second column: 2 rows: button + status
         self.rescan_button = ThreadedButton(_('Rescan Now'), self.rescan_now)
@@ -290,8 +340,11 @@ class OpendimeTab(QWidget):
 
         # Note: these column headers have already been translated elsewhere in project.
         self.table = MyTreeWidget(self, self.table_item_menu,
-                            [_('Address'), _('Status'), _('Balance'), ''],
-                            stretch_column=3)
+                            [ _('Status'), _('Address'), _('Balance')],
+                            editable_columns=[])
+
+        for col in range(1, 3):
+            self.table.header().setResizeMode(col, QHeaderView.Stretch)
 
         #self.table.setMaximumHeight(80)
         grid.addWidget(self.table, 2, 0, 1, -1)
