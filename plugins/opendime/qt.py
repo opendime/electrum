@@ -27,20 +27,29 @@
 import base64
 import urllib
 import sys
+import os
 import requests
+
+import webbrowser
 
 from PyQt4.QtGui import QApplication, QPushButton
 
 from electrum.plugins import BasePlugin, hook
 from electrum.i18n import _
 
-from electrum_gui.qt.util import EnterButton, WindowModalDialog, Buttons
-from electrum_gui.qt.util import OkButton, CloseButton
-from PyQt4.Qt import QVBoxLayout, QHBoxLayout, QWidget
-from PyQt4.Qt import QGridLayout, QPushButton, QCheckBox, QLabel
+from electrum_gui.qt.util import EnterButton, WindowModalDialog, Buttons, MONOSPACE_FONT
+from electrum_gui.qt.util import OkButton, CloseButton, MyTreeWidget, ThreadedButton
+from PyQt4.Qt import QVBoxLayout, QHBoxLayout, QWidget, QPixmap, QTreeWidgetItem, QIcon
+from PyQt4.Qt import QGridLayout, QPushButton, QCheckBox, QLabel, QMenu, QFont, QSize
+from PyQt4.Qt import QDesktopServices, QUrl
+from PyQt4.Qt import Qt
 from functools import partial
+from collections import OrderedDict
 
 from .shared import AttachedOpendime, has_libusb
+from . import  assets_rc
+
+from electrum.util import block_explorer_URL
 
 BACKGROUND_TXT = _('''\
 <h3>Opendime&trade; Helper Plugin</h3>
@@ -64,6 +73,55 @@ at <a href="https://opendime.com/electrum">Opendime.com</a>
 <hr>
 ''')
 
+
+class OpendimeItem(QTreeWidgetItem):
+    def __init__(self, unit):
+        '''
+            QTreeWidgetItem() for a single OD unit.
+        '''
+        self.unit = unit
+
+        print "New OD: %r" % unit
+
+        icon_name, status_text = self.display_status()
+
+        super(OpendimeItem, self).__init__([unit.address if not unit.is_new else '  -  ',
+                                status_text,
+                                'n/a' if unit.is_new else 'wait', '...'])
+
+        self.setChildIndicatorPolicy(QTreeWidgetItem.DontShowIndicator)
+
+        # address column
+        self.setFont(0, QFont(MONOSPACE_FONT))
+        self.setTextAlignment(0, Qt.AlignLeft)      # works, but there is a gap
+
+        # status column
+        self.setIcon(1, QIcon(icon_name))       # XXX causes warning about threads.
+
+        # balance
+        self.setTextAlignment(2, Qt.AlignRight)      # balance
+
+        # key value used for UID
+        self.serial = unit.serial
+
+    def display_status(self):
+        '''
+            Return an icon filename and a short string status for a unit.
+        '''
+        unit = self.unit
+
+        if not unit.is_sealed:
+            return ":icons/unlock.png", "Unsealed"
+
+        if not unit.verify_level:
+            return ":icons/expired.png", "INVALID"
+
+        if unit.is_new:
+            return ":icons/key.png", "Fresh"
+
+        return ":icons/seal.png", "Ready"
+
+
 class OpendimeTab(QWidget):
     def __init__(self, wallet, main_window):
         '''
@@ -84,32 +142,159 @@ class OpendimeTab(QWidget):
 
         tab_bar.insertTab(idx, self, _('Opendime') )
 
+        # these will be OpendimeItem instances, in display order, key is serial number
+        # table items (Qt widgets)
+        self.attached = OrderedDict()
+
         #if self.wallet.is_watching_only():
+
+    def table_item_menu(self, position):
+        item = self.table.itemAt(position)
+
+        if not item:
+            # item can be None if they click on a blank (unused) row.
+            return
+
+        menu = QMenu()
+
+        # read what unit is associated w/ row
+        unit = item.unit
+        assert unit
+
+        # reality check
+        sn = unit.serial
+        chk = self.attached[sn]
+        assert chk == item
+
+        if unit.problem:
+            a = menu.addAction("- DO NOT USE -", lambda: None)
+            a.setEnabled(False)
+            a = menu.addAction(unit.problem, lambda: None)
+            a.setEnabled(False)
+            menu.addSeparator()
+
+        if unit.is_new:
+            menu.addAction(_("Pick key now"), lambda: self.setup_unit(unit))
+
+        else:
+            addr = unit.address
+
+            # adding a kinda header to menu
+            a = menu.addAction(unit.address, lambda: None)
+            a.setEnabled(False)
+            menu.addSeparator()
+
+            app = QApplication.instance()
+
+            if not unit.is_sealed:
+                menu.addAction(_("Import private key"), lambda: self.import_value(unit))
+                menu.addAction(_("Sweep funds (one time)"), lambda: self.sweep_value(unit))
+                menu.addSeparator()
+            else:
+                menu.addAction(_("Pay to..."), lambda: self.main_window.pay_to_URI('bitcoin:'+addr))
+                menu.addSeparator()
+
+            menu.addAction(_("Copy to clipboard"), 
+                                lambda: app.clipboard().setText(unit.address))
+
+            menu.addAction(_("Show as QR code"),
+                lambda: self.main_window.show_qrcode(addr, 'Opendime', parent=self))
+    
+
+            # kinda words, but if they hit "next" goes to their wallet, etc.
+            #menu.addAction(_("Request payment"), lambda: self.main_window.receive_at(addr))
+            menu.addAction(_('History'), lambda: self.main_window.show_address(addr))
+
+            url = block_explorer_URL(self.main_window.config, 'addr', addr)
+            if url:
+                menu.addAction(_("View on block explorer"), lambda: webbrowser.open(url))
+
+            menu.addSeparator()
+            menu.addAction(_("View local HTML"), 
+                lambda: webbrowser.open('file:'+os.path.join(unit.root_path, 'index.htm')))
+            menu.addAction(_("Open Opendime folder"), 
+                lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(unit.root_path)))
+
+        menu.exec_(self.table.viewport().mapToGlobal(position))
+
+
+    def rescan_now(self):
+        '''
+            Slow task: look for units, update table and our state when found.
+        '''
+        try:
+            self.status_label.text = "Scanning now"
+
+            # search for any and all units presently connected.
+            paths = AttachedOpendime.find()
+
+            new = []
+            found = []
+            missing = []
+
+            for pn in paths:
+                unit = AttachedOpendime(pn)
+                if unit.serial in self.attached:
+                    found.append(unit)
+                else:
+                    new.append(unit)
+                    unit.verify_wrapped()
+
+                    # add to gui and list
+                    item = OpendimeItem(unit)
+                    sn = unit.serial
+                    self.attached[sn] = item
+
+                    self.table.addChild(item)
+
+            # remove missing ones
+            msg = None
+
+            if new:
+                msg = "%d new units found" % len(new)
+            elif missing:
+                msg = "%d units removed" % len(missing)
+            elif not self.attached:
+                msg = "No units found"
+            else:
+                msg = "No change: %d units" % len(self.attached)
+
+            self.status_label.setText(msg)
+        except Exception, e:
+            print str(e)
 
     def build_gui(self):
         '''
             Build the GUi elements for the Opendime tab.
         '''
 
-        grid = QGridLayout()
-        grid.setSpacing(8)
+        grid = QGridLayout(self)
+        grid.setSpacing(20)
         grid.setColumnStretch(3, 1)
 
-        label = QLabel(_('Opendime from/to'))
-        grid.addWidget(label, 0, 0)
+        logo = QLabel()
+        pix = QPixmap(':od-plugin/od-logo.png')
+        assert pix, "could not load logo"
+        logo.setPixmap(pix)
+        # addItem(QLayoutItem *item, row, column, rowSpan=1, columnSpan = 1, alignment = 0)
+        grid.addWidget(logo, 0, 0, 2, 1)
 
-        vbox0 = QVBoxLayout()
-        vbox0.addLayout(grid)
 
-        hbox = QHBoxLayout()
-        hbox.addLayout(vbox0)
+        # second column: 2 rows: button + status
+        self.rescan_button = ThreadedButton(_('Rescan Now'), self.rescan_now)
+        #self.rescan_button.setIcon(QIcon(":od-plugin/od-logo.png"))
+        grid.addWidget(self.rescan_button, 0, 1, alignment=Qt.AlignCenter)
 
-        vbox = QVBoxLayout(self)
-        vbox.addLayout(hbox)
-        vbox.addStretch(1)
-        ##vbox.addWidget(self.invoices_label)
-        #vbox.addWidget(self.invoices_list)
-        #vbox.setStretchFactor(self.invoices_list, 1000)
+        self.status_label = QLabel("Startup...")
+        grid.addWidget(self.status_label, 1, 1, alignment=Qt.AlignCenter)
+
+        # Note: these column headers have already been translated elsewhere in project.
+        self.table = MyTreeWidget(self, self.table_item_menu,
+                            [_('Address'), _('Status'), _('Balance'), ''],
+                            stretch_column=3)
+
+        #self.table.setMaximumHeight(80)
+        grid.addWidget(self.table, 2, 0, 1, -1)
 
     def remove_gui(self):
         '''

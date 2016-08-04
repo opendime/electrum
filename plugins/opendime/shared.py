@@ -34,7 +34,8 @@ try:
 except ImportError:
     has_psutil = False
 
-# List of checksums and known version.
+# List of checksums and known versions.
+#
 # Can be updated from https://opendime.com/versions or https://opendime.com/versions.csv
 #
 KNOWN_VERSIONS = {
@@ -110,7 +111,8 @@ Low level USB details do not match the values observed at the filesystem level!'
     
         ok = verify_message(addr, sig, msg)
         if not ok:
-            fail("Incorrect signature on test message!")
+            fail("Incorrect signature on verification message!")
+
         #print("  - (#%d) signed message ok: %s ~ %s" % (i+1, msg[0:8], msg[-8:]))
         
 
@@ -155,7 +157,7 @@ class AttachedOpendime(object):
             self.is_new = True
             self.variables = {}
 
-        self.verify()
+        # should usally follow up with: self.verify()
 
     def make_fname(self, *path_parts):
         fname = os.path.join(self.root_path, *path_parts)
@@ -182,7 +184,7 @@ class AttachedOpendime(object):
             return [p.mountpoint for p in psutil.disk_partitions() if
                         p.fstype.lower() not in ('ntfs', 'hfs')]
         
-        # failback code here... for when psutils not installed
+        # fallback code here... for when psutils not installed
 
         if os.name == 'posix':
             # linux might mount under /media/<username>/ or /media/usb*/
@@ -219,9 +221,23 @@ class AttachedOpendime(object):
         
         return [p for p in mounts if cls.probe_opendime(p)]
 
+    def verify_wrapped(self):
+        # wrapper 
+        try:
+            self.verify()
+            self.problem = None
+        except AssertionError as e:
+            self.verify_level = 0
+            self.problem = str(e)
+
     def verify(self):
         '''
             Check this is an authentic Opendime, which knows the right priv key.
+
+            Raises an AssertionError on any issue; all of which indicate failure
+            and untrustworthy unit.
+
+            Quality of verification is shown in self.verify_level as 1 through 10 or so.
         '''
         if self.version in KNOWN_VERSIONS:
             chk = self.get_checksum()
@@ -241,7 +257,7 @@ class AttachedOpendime(object):
             self.verify_level += 1
 
         if self.is_new:
-            # limited checking possible w/o a private key, but stakes
+            # Limited checking possible w/o a private key, but stakes
             # are at zero anyway?
             return
 
@@ -287,7 +303,10 @@ class AttachedOpendime(object):
 
     @property
     def serial(self):
-        return self.variables.get('sn', 'unknown').strip()
+        if 'sn' in self.variables:
+            return self.variables['sn'].strip()
+        # New units don't report their serial numbers (yet!!). Make one.
+        return 'VVV'+str(id(self))
 
     @property
     def privkey(self):
@@ -311,6 +330,7 @@ def test_macos():
 
     for pn in ods:
         a = AttachedOpendime(pn)
+        a.verify()
         print
         print 'repr(a) = %r' % a
         print 'is_sealed = %r' % a.is_sealed
