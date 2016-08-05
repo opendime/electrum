@@ -29,6 +29,7 @@ import urllib
 import sys
 import os
 import requests
+import sip
 
 import webbrowser
 
@@ -39,9 +40,10 @@ from electrum.i18n import _
 
 from electrum_gui.qt.util import EnterButton, WindowModalDialog, Buttons, MONOSPACE_FONT
 from electrum_gui.qt.util import OkButton, CloseButton, MyTreeWidget, ThreadedButton
+from electrum_gui.qt.qrcodewidget import QRCodeWidget
 from PyQt4.Qt import QVBoxLayout, QHBoxLayout, QWidget, QPixmap, QTreeWidgetItem, QIcon
 from PyQt4.Qt import QGridLayout, QPushButton, QCheckBox, QLabel, QMenu, QFont, QSize
-from PyQt4.Qt import QDesktopServices, QUrl, QHeaderView, QFrame
+from PyQt4.Qt import QDesktopServices, QUrl, QHeaderView, QFrame, QFontMetrics, QSpacerItem
 from PyQt4.QtCore import pyqtSignal
 from PyQt4.Qt import Qt
 from functools import partial
@@ -86,11 +88,8 @@ class OpendimeItem(QTreeWidgetItem):
 
         icon_name, status_text = self.display_status()
 
-        # resorting the text formatin ghere!
-        addr = '%-37s' % (unit.address if not unit.is_new else '  -  ')
-
-        super(OpendimeItem, self).__init__([status_text, addr,
-                                '' if unit.is_new else '?'])
+        addr = unit.address if not unit.is_new else '  -  '
+        super(OpendimeItem, self).__init__([status_text, addr, '' if unit.is_new else '?'])
 
         self.setChildIndicatorPolicy(QTreeWidgetItem.DontShowIndicator)
 
@@ -124,6 +123,96 @@ class OpendimeItem(QTreeWidgetItem):
 
         return ":icons/seal.png", "Ready"
 
+class OpendimeDetailView:
+    '''
+        A GUI box that holds details about a single opendime unit
+        and provides a few key common functions as buttons.
+    '''
+    def __init__(self, parent, main_window):
+
+        self.main_window = main_window
+        y = 0
+
+        g2 = QGridLayout(parent)
+        g2.setSpacing(4)
+        g2.setColumnMinimumWidth(0, OpendimeTab.ADDR_TEXT_WIDTH * 1.2)
+
+        self.qr = QRCodeWidget(fixedSize=180)
+        g2.addWidget(self.qr, y, 0); y+=1
+
+        self.address = QLabel()
+        self.address.setFont(QFont(MONOSPACE_FONT))
+        g2.addWidget(self.address, y, 0); y+=1
+
+        self.status = QPushButton()
+        self.status.setFlat(True)
+        self.status.setAutoFillBackground(True)
+        self.status.pressed.connect(self.on_status_click)
+        g2.addWidget(self.status, y, 0); y+=1
+
+        self.balance = QLabel("Balance Here")
+        g2.addWidget(self.balance, y, 0); y+=1
+
+        self.buttons = Buttons(QPushButton("Main"), QPushButton("Second"))
+        #g2.addWidget(self.buttons, 3, 0)
+        g2.addLayout(self.buttons, y, 0); y+=1
+
+        self.blank()
+
+    def show(self, item):
+        '''
+            Display the details about that item
+        '''
+        unit = item.unit
+        self.current_item = item
+
+        if unit.is_new:
+            self.qr.hide()
+            self.address.setText('-')
+        else:
+            self.address.setText(unit.address)
+            self.qr.setData(unit.address)
+            self.qr.show()
+
+        icn, txt = item.display_status()
+        self.status.setText(txt)
+        self.status.setIcon(QIcon(icn))
+
+        self.status.parent().show()
+
+    def blank(self):
+        '''
+            Be emptiness.
+        '''
+
+        # best to just hide the whole frame.
+        self.current_item = None
+        self.status.parent().hide()
+
+    def on_status_click(self):
+        '''
+            Show something for click on status
+        '''
+        unit = self.current_item.unit
+        
+        if unit.problem:
+            msg = '- DO NOT USE -\n\n'
+            msg += unit.problem + '\n\n'
+
+            self.main_window.show_error(msg)
+            return
+
+        if unit.is_new:
+            msg = 'Opendime is factory fresh and does not yet have a private key'
+        elif unit.is_sealed:
+            msg = 'Ready for use. Load funds and/or view balance.'
+        elif not unit.is_sealed:
+            msg = 'The seal has been broken. Sweep funds immediately from this Opendime.'
+        else:
+            msg = "I'm confused"
+
+        self.main_window.show_message(msg)
+
 
 class OpendimeTab(QWidget):
 
@@ -131,11 +220,19 @@ class OpendimeTab(QWidget):
     new_unit_sig = pyqtSignal(AttachedOpendime)
     scan_done_sig = pyqtSignal(list)
 
+    # calculated a little later.
+    ADDR_TEXT_WIDTH = None
+
     def __init__(self, wallet, main_window):
         '''
             Each open wallet may have an Opendime tab.
         '''
         QWidget.__init__(self)
+
+        # P2PKH addresses will always be no wider than this size on screen.
+        if not self.ADDR_TEXT_WIDTH:
+            met = QFontMetrics(QFont(MONOSPACE_FONT))
+            OpendimeTab.ADDR_TEXT_WIDTH = met.width("M") * 35
 
         # capture these
         self.wallet = wallet
@@ -157,8 +254,8 @@ class OpendimeTab(QWidget):
         #if self.wallet.is_watching_only():
 
         # connect slots
-        self.new_unit_sig.connect(self.new_unit_detected)
-        self.scan_done_sig.connect(self.scan_done_handler)
+        self.new_unit_sig.connect(self.on_new_unit)
+        self.scan_done_sig.connect(self.on_scan_done)
 
     def table_item_menu(self, position):
         item = self.table.itemAt(position)
@@ -226,11 +323,11 @@ class OpendimeTab(QWidget):
             if url:
                 menu.addAction(_("View on block explorer"), lambda: webbrowser.open(url))
 
-            menu.addSeparator()
-            menu.addAction(_("View Opendime page (local HTML)"), 
-                lambda: webbrowser.open('file:'+os.path.join(unit.root_path, 'index.htm')))
-            menu.addAction(_("Reveal Opendime files"), 
-                lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(unit.root_path)))
+        menu.addSeparator()
+        menu.addAction(_("View Opendime page (local HTML)"), 
+            lambda: webbrowser.open('file:'+os.path.join(unit.root_path, 'index.htm')))
+        menu.addAction(_("Reveal Opendime files"), 
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(unit.root_path)))
 
         menu.exec_(self.table.viewport().mapToGlobal(position))
 
@@ -249,7 +346,6 @@ class OpendimeTab(QWidget):
 
             new = []
             found = []
-            missing = []
 
             for pn in paths:
                 unit = AttachedOpendime(pn)
@@ -260,13 +356,9 @@ class OpendimeTab(QWidget):
 
                     self.new_unit_sig.emit(unit)
 
-            # remove missing ones
             msg = None
-
             if new:
                 msg = "%d new units found" % len(new)
-            elif missing:
-                msg = "%d units removed" % len(missing)
             elif not self.attached:
                 msg = "No units found"
             else:
@@ -281,33 +373,15 @@ class OpendimeTab(QWidget):
             print str(e)
 
 
-    def new_unit_detected(self, unit):
-        '''
-            New opendime found, and was added to Q.
-        '''
-        # add to gui and list
-        item = OpendimeItem(unit)
-        sn = unit.serial
-        self.attached[sn] = item
-
-        self.table.addChild(item)
-
-    def scan_done_handler(self, found_serials):
-        '''
-            Scan of drives is complete, and we found those serial number.
-            Anything else in our list, is now disconnected.
-        '''
-        print found_serials
-
-
     def build_gui(self):
         '''
-            Build the GUi elements for the Opendime tab.
+            Build the GUI elements for the Opendime tab.
         '''
 
         grid = QGridLayout(self)
-        grid.setSpacing(10)
-        grid.setColumnStretch(3, 1)
+        grid.setHorizontalSpacing(30)
+        grid.setVerticalSpacing(0)
+        #grid.setColumnStretch(3, 1)
 
         prod = QLabel()
         prod.setPixmap(QPixmap(':od-plugin/prod-shot.png').scaledToWidth(300))
@@ -323,10 +397,14 @@ class OpendimeTab(QWidget):
 
         frame = QFrame()
         frame.setFrameStyle(QFrame.Box | QFrame.Plain)
-        vb = QVBoxLayout(frame)
-        self.details = vb
-        vb.addWidget(QLabel("testing 123"))
-        grid.addWidget(frame, 0, 2)
+        self.details = OpendimeDetailView(frame, self.main_window)
+
+        grid.addItem(QSpacerItem(0, 0), 0, 3)
+        grid.addWidget(frame, 0, 4, 2, 1)       # spans two rows
+
+        #grid.setColumnStretch(0, 2)
+        grid.setColumnStretch(1, 10)
+        grid.setColumnStretch(2, 10)
 
         # addItem(QLayoutItem *item, row, column, rowSpan=1, columnSpan = 1, alignment = 0)
 
@@ -343,11 +421,79 @@ class OpendimeTab(QWidget):
                             [ _('Status'), _('Address'), _('Balance')],
                             editable_columns=[])
 
-        for col in range(1, 3):
-            self.table.header().setResizeMode(col, QHeaderView.Stretch)
+        self.table.header().setResizeMode(QHeaderView.Stretch)
 
-        #self.table.setMaximumHeight(80)
-        grid.addWidget(self.table, 2, 0, 1, -1)
+        grid.addItem(QSpacerItem(0, 20), 2, 0, 1, 4)
+
+        grid.addWidget(self.table, 3, 0, 1, -1)
+
+        # slots
+        self.table.currentItemChanged.connect(self.on_item_select)
+
+    def on_item_select(self, cur_item, old_item=None):
+        '''
+            Specifc opendime has been selected; display it's details.
+
+            Can be None if item deleted or list now empty.
+        '''
+        print "Select: %r" % cur_item
+
+        if cur_item:
+            self.details.show(cur_item)
+        else:
+            self.details.blank()
+
+    def on_new_unit(self, unit):
+        '''
+            New opendime found, and was added to Q.
+        '''
+        # add to gui and list
+        item = OpendimeItem(unit)
+        sn = unit.serial
+        self.attached[sn] = item
+
+        self.table.addChild(item)
+
+    def on_scan_done(self, found_serials):
+        '''
+            Scan of drives is complete, and we found those serial number.
+            Anything else in our list, is now disconnected.
+
+            I was tempted to keep previously-attached units in the list,
+            since for most operations we already know all we need to, but
+            it's a privacy problem, and could lead to confusion. So our policy
+            will be the Opendime has to be connected to interact with it.
+            Add the address to your wallet (somehow?) if you want to watch it.
+        '''
+        missing = set(self.attached.keys()) - set(found_serials)
+
+        # remove associated GUI objects
+        for sn in missing:
+            item = self.attached[sn]
+            sip.delete(item)
+            del self.attached[sn]
+
+        # might need to select something new
+        self.rethink_selection()
+
+    def rethink_selection(self):
+        '''
+            Auto-select a unit when appropriate.
+        '''
+        sel = self.table.selectedItems()
+        if sel:
+            # something already selected
+            return
+
+        if not self.attached:
+            # nothing to select
+            return
+
+        # always pick the bottom entry; it's the most recently connected
+        item = self.attached[self.attached.keys()[-1]]
+        item.setSelected(True)
+        self.on_item_select(item)
+
 
     def remove_gui(self):
         '''
