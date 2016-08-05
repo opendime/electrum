@@ -44,6 +44,7 @@ from electrum_gui.qt.util import EnterButton, WindowModalDialog, Buttons, MONOSP
 from electrum_gui.qt.util import OkButton, CloseButton, MyTreeWidget, ThreadedButton
 from electrum_gui.qt.qrcodewidget import QRCodeWidget
 from electrum_gui.qt.address_dialog import AddressDialog
+from electrum_gui.qt.main_window import ElectrumWindow
 from PyQt4.Qt import QVBoxLayout, QHBoxLayout, QWidget, QPixmap, QTreeWidgetItem, QIcon
 from PyQt4.Qt import QGridLayout, QPushButton, QCheckBox, QLabel, QMenu, QFont, QSize
 from PyQt4.Qt import QDesktopServices, QUrl, QHeaderView, QFrame, QFontMetrics, QSpacerItem
@@ -237,6 +238,9 @@ class OpendimeTab(QWidget):
 
         # capture these
         self.real_wallet = wallet
+        while not isinstance(main_window, ElectrumWindow):
+            main_window = main_window.parent()
+            assert main_window
         self.main_window = main_window
 
         # for balance tracking we need a wallet which will be an
@@ -252,10 +256,6 @@ class OpendimeTab(QWidget):
         tab_bar = main_window.tabs
         idx = tab_bar.count() - 1
 
-        self.build_gui()
-
-        tab_bar.insertTab(idx, self, _('Opendime') )
-
         # these will be OpendimeItem instances, in display order, key is serial number
         # table items (Qt widgets)
         self.attached = OrderedDict()
@@ -264,6 +264,10 @@ class OpendimeTab(QWidget):
         self.new_unit_sig.connect(self.on_new_unit)
         self.scan_done_sig.connect(self.on_scan_done)
         self.more_txn_data_sig.connect(self.on_more_txn_data)
+
+        self.build_gui()
+
+        tab_bar.insertTab(idx, self, _('Opendime') )
 
     def table_item_menu(self, position):
         item = self.table.itemAt(position)
@@ -498,11 +502,16 @@ class OpendimeTab(QWidget):
                 self.od_wallet.delete_imported_key(item.unit.address)
 
     def show_history(self, addr):
-        # NOTE: this uses self for .wallet, .config and .app, but
-        # we don't want those from main_window and yet no need for them... plus
-        # it calls HistoryWidget which makes the same assumptions.
-        # This list was created by exploring the UI...
-        for fn in ['show_transaction', 'app', 'config', 'format_amount']:
+
+		# PROBLEM: AddressDialog uses self.parent and assumes it's a main_window
+		# window.  Mostly that's fine, except I want to use our od_wallet.
+		# No clean way to fix this because AddressDialog then calls calls
+		# HistoryWidget which makes the same assumptions and so on.
+
+        # This list was created by exploring the UI... imperfect.
+        flds = ['show_transaction', 'app', 'config', 'format_amount', 'show_qr']
+
+        for fn in flds:
             setattr(self, fn, getattr(self.main_window, fn))
 
         d = AddressDialog(self, addr)
