@@ -103,10 +103,9 @@ class OpendimeItem(QTreeWidgetItem):
 
         # address column
         self.setFont(1, QFont(MONOSPACE_FONT))
-        #self.setTextAlignment(1, Qt.AlignLeft)      # works, but there is a gap?
 
         # balance
-        #self.setTextAlignment(2, Qt.AlignRight)      # balance
+        self.setFont(2, QFont(MONOSPACE_FONT))
 
         # key value used for UID
         self.serial = unit.serial
@@ -128,10 +127,26 @@ class OpendimeItem(QTreeWidgetItem):
 
         return ":icons/seal.png", "Ready"
 
-    def fetch_balance(self):
+    def update_balance(self, confirmed, unconf, immature, formatter):
         '''
-            Ask an electrum server what the balance is for this Opendime.
+            Update our display of balance. Try not to mislead.
+
+            Really don't like "0." for empty ... but oh well.
         '''
+        unconf += immature
+        txt = formatter(confirmed + unconf, whitespaces=True)
+
+        if unconf:
+            icon = QIcon(":icons/unconfirmed.png")
+        elif confirmed:
+            icon = QIcon(":icons/confirmed.png")
+        else:
+            icon = QIcon(":od-plugin/placeholder.png")
+
+        self.setIcon(2, icon)
+        self.setText(2, txt)
+
+
         unit = self.unit
         assert not unit.is_new
 
@@ -150,7 +165,7 @@ class InMemoryStorage(PrintError):
     def read(self, path):
         raise NotImplementedError
     def write(self):
-        raise NotImplementedError
+        pass
 
     def get(self, key, default=None):
         with self.lock:
@@ -193,7 +208,9 @@ class OpendimeTransientWallet(Imported_Wallet):
         # need an event to know when changes/results are known
         super(OpendimeTransientWallet, self).save_transactions(write)
 
-        print "saved: %s" % self.history
+        print "updates: %s" % self.history
+
+        self.od_tab.more_txn_data_sig.emit()
 
 
 class OpendimeTab(QWidget):
@@ -201,6 +218,8 @@ class OpendimeTab(QWidget):
     # signals for slotting
     new_unit_sig = pyqtSignal(AttachedOpendime)
     scan_done_sig = pyqtSignal(list)
+
+    more_txn_data_sig = pyqtSignal()
 
     # calculated a little later.
     ADDR_TEXT_WIDTH = None
@@ -217,14 +236,16 @@ class OpendimeTab(QWidget):
             OpendimeTab.ADDR_TEXT_WIDTH = met.width("M") * 35
 
         # capture these
-        self.wallet = wallet
+        self.real_wallet = wallet
         self.main_window = main_window
 
         # for balance tracking we need a wallet which will be an
         # 'imported' watch-only type wallet, and uses fake storage
         self.od_wallet = OpendimeTransientWallet(InMemoryStorage())
-        self.od_wallet.network = wallet.network
-        self.od_wallet.synchronizer = wallet.synchronizer
+        self.od_wallet.od_tab = self
+        self.od_wallet.start_threads(self.main_window.network)
+
+        self.wallet = self.od_wallet        # other code compat.
 
         # Make a new tab, and insert as second-last. Keeping 'console'
         # as last tab, since that's more important than us.
@@ -242,6 +263,7 @@ class OpendimeTab(QWidget):
         # connect slots
         self.new_unit_sig.connect(self.on_new_unit)
         self.scan_done_sig.connect(self.on_scan_done)
+        self.more_txn_data_sig.connect(self.on_more_txn_data)
 
     def table_item_menu(self, position):
         item = self.table.itemAt(position)
@@ -319,7 +341,7 @@ class OpendimeTab(QWidget):
 
 
             # disable items not possible w/ watchonly wallet
-            if self.wallet.is_watching_only():
+            if self.real_wallet.is_watching_only():
                 for a in needs_wall:
                     a.setEnabled(False)
 
@@ -420,6 +442,23 @@ class OpendimeTab(QWidget):
 
         grid.addWidget(self.status_label, 5, 0, 1, 3, alignment=Qt.AlignLeft)
 
+        self.rescan_button.clicked.emit(True)
+
+    def on_more_txn_data(self):
+        '''
+            A payment was received, or something confirmed, and so on... some
+            kind of event for our units... so redisplay all balances.
+        '''
+        for item in self.attached.values():
+            if item.unit.is_new:
+                continue
+
+            # get current balance data
+            bal = self.od_wallet.get_addr_balance(item.unit.address)
+
+            item.update_balance(*bal, formatter=self.main_window.format_amount)
+
+
     def on_new_unit(self, unit):
         '''
             New opendime found, and was added to Q.
@@ -434,8 +473,6 @@ class OpendimeTab(QWidget):
         # start watching the payment address
         if not unit.is_new:
             self.od_wallet.import_address(unit.address)
-
-        item.fetch_balance()
 
     def on_scan_done(self, found_serials):
         '''
@@ -461,9 +498,14 @@ class OpendimeTab(QWidget):
                 self.od_wallet.delete_imported_key(item.unit.address)
 
     def show_history(self, addr):
-        # NOTE: this uses self.main_window for config and app, but
-        # our wallet for data.
-        d = AddressDialog(self.main_window, addr, wallet=self.od_wallet)
+        # NOTE: this uses self for .wallet, .config and .app, but
+        # we don't want those from main_window and yet no need for them... plus
+        # it calls HistoryWidget which makes the same assumptions.
+        # This list was created by exploring the UI...
+        for fn in ['show_transaction', 'app', 'config', 'format_amount']:
+            setattr(self, fn, getattr(self.main_window, fn))
+
+        d = AddressDialog(self, addr)
         d.exec_() 
 
     def remove_gui(self):
