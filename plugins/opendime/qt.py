@@ -30,6 +30,8 @@ import sys
 import os
 import requests
 import sip
+import copy
+import threading
 
 import webbrowser
 
@@ -41,6 +43,7 @@ from electrum.i18n import _
 from electrum_gui.qt.util import EnterButton, WindowModalDialog, Buttons, MONOSPACE_FONT
 from electrum_gui.qt.util import OkButton, CloseButton, MyTreeWidget, ThreadedButton
 from electrum_gui.qt.qrcodewidget import QRCodeWidget
+from electrum_gui.qt.address_dialog import AddressDialog
 from PyQt4.Qt import QVBoxLayout, QHBoxLayout, QWidget, QPixmap, QTreeWidgetItem, QIcon
 from PyQt4.Qt import QGridLayout, QPushButton, QCheckBox, QLabel, QMenu, QFont, QSize
 from PyQt4.Qt import QDesktopServices, QUrl, QHeaderView, QFrame, QFontMetrics, QSpacerItem
@@ -49,10 +52,12 @@ from PyQt4.Qt import Qt
 from functools import partial
 from collections import OrderedDict
 
+from electrum.wallet import Imported_Wallet, IMPORTED_ACCOUNT
+
 from .shared import AttachedOpendime, has_libusb
 from . import  assets_rc
 
-from electrum.util import block_explorer_URL
+from electrum.util import block_explorer_URL, PrintError
 
 BACKGROUND_TXT = _('''\
 <h3>Opendime&trade; Helper Plugin</h3>
@@ -123,95 +128,72 @@ class OpendimeItem(QTreeWidgetItem):
 
         return ":icons/seal.png", "Ready"
 
-class OpendimeDetailView:
+    def fetch_balance(self):
+        '''
+            Ask an electrum server what the balance is for this Opendime.
+        '''
+        unit = self.unit
+        assert not unit.is_new
+
+
+class InMemoryStorage(PrintError):
     '''
-        A GUI box that holds details about a single opendime unit
-        and provides a few key common functions as buttons.
+        Replacement for lib/wallet.Storage object which will only
+        store things in memory during operation. We don't need/want to 
+        remember anything about Opendimes we have seen in the past.
     '''
-    def __init__(self, parent, main_window):
 
-        self.main_window = main_window
-        y = 0
+    def __init__(self, path=None):
+        self.lock = threading.RLock()
+        self.data = {}
 
-        g2 = QGridLayout(parent)
-        g2.setSpacing(4)
-        g2.setColumnMinimumWidth(0, OpendimeTab.ADDR_TEXT_WIDTH * 1.2)
+    def read(self, path):
+        raise NotImplementedError
+    def write(self):
+        raise NotImplementedError
 
-        self.qr = QRCodeWidget(fixedSize=180)
-        g2.addWidget(self.qr, y, 0); y+=1
+    def get(self, key, default=None):
+        with self.lock:
+            v = self.data.get(key)
+            return default if v is None else copy.deepcopy(v)
 
-        self.address = QLabel()
-        self.address.setFont(QFont(MONOSPACE_FONT))
-        g2.addWidget(self.address, y, 0); y+=1
+    def put(self, key, value):
+        with self.lock:
+            if value is not None:
+                if self.data.get(key) != value:
+                    self.data[key] = copy.deepcopy(value)
+            elif key in self.data:
+                self.data.pop(key)
 
-        self.status = QPushButton()
-        self.status.setFlat(True)
-        self.status.setAutoFillBackground(True)
-        self.status.pressed.connect(self.on_status_click)
-        g2.addWidget(self.status, y, 0); y+=1
+class OpendimeTransientWallet(Imported_Wallet):
+    '''
+        Fake wallet used to monitor balances of Opendimes that are presently connected.
+    '''
 
-        self.balance = QLabel("Balance Here")
-        g2.addWidget(self.balance, y, 0); y+=1
+    def is_watching_only(self):
+        return True
 
-        self.buttons = Buttons(QPushButton("Main"), QPushButton("Second"))
-        #g2.addWidget(self.buttons, 3, 0)
-        g2.addLayout(self.buttons, y, 0); y+=1
+    def check_password(self, password):
+        # not encrypted
+        pass
 
-        self.blank()
+    def import_address(self, address):
+        # abstract wallet doesn't have this, but there is a constructor
+        self.accounts[IMPORTED_ACCOUNT].add(address, None, None, None)
+        self.save_accounts()
 
-    def show(self, item):
-        '''
-            Display the details about that item
-        '''
-        unit = item.unit
-        self.current_item = item
+        # force resynchronization, because we need to re-run add_transaction
+        if address in self.history:
+            self.history.pop(address)
 
-        if unit.is_new:
-            self.qr.hide()
-            self.address.setText('-')
-        else:
-            self.address.setText(unit.address)
-            self.qr.setData(unit.address)
-            self.qr.show()
+        assert self.synchronizer
+        self.synchronizer.add(address)
 
-        icn, txt = item.display_status()
-        self.status.setText(txt)
-        self.status.setIcon(QIcon(icn))
+    def save_transactions(self, write=False):
+        # need an event to know when changes/results are known
+        super(OpendimeTransientWallet, self).save_transactions(write)
 
-        self.status.parent().show()
-
-    def blank(self):
-        '''
-            Be emptiness.
-        '''
-
-        # best to just hide the whole frame.
-        self.current_item = None
-        self.status.parent().hide()
-
-    def on_status_click(self):
-        '''
-            Show something for click on status
-        '''
-        unit = self.current_item.unit
-        
-        if unit.problem:
-            msg = '- DO NOT USE -\n\n'
-            msg += unit.problem + '\n\n'
-
-            self.main_window.show_error(msg)
-            return
-
-        if unit.is_new:
-            msg = 'Opendime is factory fresh and does not yet have a private key'
-        elif unit.is_sealed:
-            msg = 'Ready for use. Load funds and/or view balance.'
-        elif not unit.is_sealed:
-            msg = 'The seal has been broken. Sweep funds immediately from this Opendime.'
-        else:
-            msg = "I'm confused"
-
-        self.main_window.show_message(msg)
+        print "saved: %s" % self.history
 
 
 class OpendimeTab(QWidget):
@@ -238,6 +220,12 @@ class OpendimeTab(QWidget):
         self.wallet = wallet
         self.main_window = main_window
 
+        # for balance tracking we need a wallet which will be an
+        # 'imported' watch-only type wallet, and uses fake storage
+        self.od_wallet = OpendimeTransientWallet(InMemoryStorage())
+        self.od_wallet.network = wallet.network
+        self.od_wallet.synchronizer = wallet.synchronizer
+
         # Make a new tab, and insert as second-last. Keeping 'console'
         # as last tab, since that's more important than us.
         tab_bar = main_window.tabs
@@ -250,8 +238,6 @@ class OpendimeTab(QWidget):
         # these will be OpendimeItem instances, in display order, key is serial number
         # table items (Qt widgets)
         self.attached = OrderedDict()
-
-        #if self.wallet.is_watching_only():
 
         # connect slots
         self.new_unit_sig.connect(self.on_new_unit)
@@ -282,6 +268,8 @@ class OpendimeTab(QWidget):
             a.setEnabled(False)
             menu.addSeparator()
 
+        needs_wall = set()
+
         if unit.is_new:
             menu.addAction(_("Pick key now (initialize)"), lambda: self.setup_unit(unit))
 
@@ -296,12 +284,18 @@ class OpendimeTab(QWidget):
             app = QApplication.instance()
 
             if not unit.is_sealed:
-                menu.addAction(_("Import private key into Electrum"),
+                a = menu.addAction(_("Import private key into Electrum"),
                                         lambda: self.import_value(unit))
-                menu.addAction(_("Sweep funds (one time)"), lambda: self.sweep_value(unit))
+                needs_wall.add(a)
+
+                a = menu.addAction(_("Sweep funds (one time)"), lambda: self.sweep_value(unit))
+                needs_wall.add(a)
+
                 menu.addSeparator()
             else:
-                menu.addAction(_("Pay to..."), lambda: self.main_window.pay_to_URI('bitcoin:'+addr))
+                a = menu.addAction(_("Pay to..."),
+                                        lambda: self.main_window.pay_to_URI('bitcoin:'+addr))
+                needs_wall.add(a)
                 menu.addSeparator()
 
             # Maybe todo: could open as a new wallet; either watch-only or if unsealed,
@@ -317,11 +311,17 @@ class OpendimeTab(QWidget):
 
             # kinda words, but if they hit "next" goes to their wallet, etc.
             #menu.addAction(_("Request payment"), lambda: self.main_window.receive_at(addr))
-            menu.addAction(_('History'), lambda: self.main_window.show_address(addr))
+            menu.addAction(_('History'), lambda: self.show_history(addr))
 
             url = block_explorer_URL(self.main_window.config, 'addr', addr)
             if url:
                 menu.addAction(_("View on block explorer"), lambda: webbrowser.open(url))
+
+
+            # disable items not possible w/ watchonly wallet
+            if self.wallet.is_watching_only():
+                for a in needs_wall:
+                    a.setEnabled(False)
 
         menu.addSeparator()
         menu.addAction(_("View Opendime page (local HTML)"), 
@@ -358,11 +358,11 @@ class OpendimeTab(QWidget):
 
             msg = None
             if new:
-                msg = "%d new units found" % len(new)
+                msg = "%d new units found." % len(new)
             elif not self.attached:
-                msg = "No units found"
+                msg = "No units found. Wait and try again."
             else:
-                msg = "No change: %d units" % len(self.attached)
+                msg = "No change: %d units." % len(self.attached)
 
             self.status_label.setText(msg)
 
@@ -391,30 +391,16 @@ class OpendimeTab(QWidget):
         hp_link.openExternalLinks = True
         grid.addWidget(hp_link, 1, 0)
 
-        #logo = QLabel()
-        #logo.setPixmap(QPixmap(':od-plugin/od-logo.png').scaledToWidth(100))
-        #grid.addWidget(logo, 1, 0, 1, 1)
-
-        frame = QFrame()
-        frame.setFrameStyle(QFrame.Box | QFrame.Plain)
-        self.details = OpendimeDetailView(frame, self.main_window)
-
-        grid.addItem(QSpacerItem(0, 0), 0, 3)
-        grid.addWidget(frame, 0, 4, 2, 1)       # spans two rows
-
-        #grid.setColumnStretch(0, 2)
-        grid.setColumnStretch(1, 10)
-        grid.setColumnStretch(2, 10)
+        grid.setColumnStretch(1, 100)
+        #grid.setColumnStretch(1, 10)
+        #grid.setColumnStretch(2, 10)
 
         # addItem(QLayoutItem *item, row, column, rowSpan=1, columnSpan = 1, alignment = 0)
 
         # second column: 2 rows: button + status
         self.rescan_button = ThreadedButton(_('Rescan Now'), self.rescan_now)
-        #self.rescan_button.setIcon(QIcon(":od-plugin/od-logo.png"))
+        self.rescan_button.setIcon(QIcon(":od-plugin/rescan-icon.png"))
         grid.addWidget(self.rescan_button, 0, 1, alignment=Qt.AlignCenter)
-
-        self.status_label = QLabel("Startup...")
-        grid.addWidget(self.status_label, 1, 1, alignment=Qt.AlignCenter)
 
         # Note: these column headers have already been translated elsewhere in project.
         self.table = MyTreeWidget(self, self.table_item_menu,
@@ -423,25 +409,16 @@ class OpendimeTab(QWidget):
 
         self.table.header().setResizeMode(QHeaderView.Stretch)
 
+        # some forced space between header stuff and table
         grid.addItem(QSpacerItem(0, 20), 2, 0, 1, 4)
 
         grid.addWidget(self.table, 3, 0, 1, -1)
 
-        # slots
-        self.table.currentItemChanged.connect(self.on_item_select)
+        # space between table and status line under it.
+        grid.addItem(QSpacerItem(0, 10), 4, 0, 1, 4)
+        self.status_label = QLabel("Click to start scan.")
 
-    def on_item_select(self, cur_item, old_item=None):
-        '''
-            Specifc opendime has been selected; display it's details.
-
-            Can be None if item deleted or list now empty.
-        '''
-        print "Select: %r" % cur_item
-
-        if cur_item:
-            self.details.show(cur_item)
-        else:
-            self.details.blank()
+        grid.addWidget(self.status_label, 5, 0, 1, 3, alignment=Qt.AlignLeft)
 
     def on_new_unit(self, unit):
         '''
@@ -453,6 +430,12 @@ class OpendimeTab(QWidget):
         self.attached[sn] = item
 
         self.table.addChild(item)
+
+        # start watching the payment address
+        if not unit.is_new:
+            self.od_wallet.import_address(unit.address)
+
+        item.fetch_balance()
 
     def on_scan_done(self, found_serials):
         '''
@@ -473,27 +456,15 @@ class OpendimeTab(QWidget):
             sip.delete(item)
             del self.attached[sn]
 
-        # might need to select something new
-        self.rethink_selection()
+            # stop caring about it's balance.
+            if not item.unit.is_new:
+                self.od_wallet.delete_imported_key(item.unit.address)
 
-    def rethink_selection(self):
-        '''
-            Auto-select a unit when appropriate.
-        '''
-        sel = self.table.selectedItems()
-        if sel:
-            # something already selected
-            return
-
-        if not self.attached:
-            # nothing to select
-            return
-
-        # always pick the bottom entry; it's the most recently connected
-        item = self.attached[self.attached.keys()[-1]]
-        item.setSelected(True)
-        self.on_item_select(item)
-
+    def show_history(self, addr):
+        # NOTE: this uses self.main_window for config and app, but
+        # our wallet for data.
+        d = AddressDialog(self.main_window, addr, wallet=self.od_wallet)
+        d.exec_() 
 
     def remove_gui(self):
         '''
