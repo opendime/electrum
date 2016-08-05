@@ -34,12 +34,12 @@ from history_widget import HistoryWidget
 
 class AddressDialog(WindowModalDialog):
 
-    def __init__(self, parent, address, wallet=None):
+    def __init__(self, parent, address):
         WindowModalDialog.__init__(self, parent, _("Address"))
         self.address = address
         self.parent = parent
         self.config = parent.config
-        self.wallet = wallet or parent.wallet
+        self.wallet = parent.wallet
         self.app = parent.app
         self.saved = True
 
