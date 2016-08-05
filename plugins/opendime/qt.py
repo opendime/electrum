@@ -55,7 +55,7 @@ from collections import OrderedDict
 
 from electrum.wallet import Imported_Wallet, IMPORTED_ACCOUNT
 
-from .shared import AttachedOpendime, has_libusb
+from .shared import AttachedOpendime, has_libusb, has_psutil
 from . import  assets_rc
 
 from electrum.util import block_explorer_URL, PrintError
@@ -628,17 +628,36 @@ class Plugin(BasePlugin):
             grid.addWidget(grab_checkbox, y,1)
             y += 1
 
-        # checkbox: do extra verification
-        def on_change_verify(checked):
-            self.config.set_key('od_verify', bool(checked))
+        # checkboxes ... readouts not controls, sigh.
+        def on_change_check(chkbox, forced_state):
+            chkbox.setChecked(forced_state)
+
+            if forced_state:
+                msg = '''This feature is enabled if suitable python modules are 
+installed and there is no reason to disable it.'''
+            else:
+                msg = '''Please try: "sudo pip install psutil pyusb" 
+... and then restart Electrum'''
+
+            window.show_message(msg)
 
         verify_checkbox = QCheckBox()
-        verify_checkbox.setChecked(self.config.get("od_verify", False))
-        verify_checkbox.stateChanged.connect(on_change_verify)
+        verify_checkbox.setChecked(has_libusb)
+        verify_checkbox.stateChanged.connect(lambda x: on_change_check(verify_checkbox, has_libusb))
 
         grid.addWidget(QLabel(_(
-            'Perform extra device authenticity checks (for the paranoid)? ')), y, 0)
+            'Perform maximum device authenticity checks (for the paranoid)? ')), y, 0)
         grid.addWidget(verify_checkbox, y,1)
+        y += 1
+
+        psut_checkbox = QCheckBox()
+        psut_checkbox.setChecked(has_psutil)
+        psut_checkbox.stateChanged.connect(on_change_check)
+        psut_checkbox.stateChanged.connect(lambda x: on_change_check(psut_checkbox, has_psutil))
+
+        grid.addWidget(QLabel(_(
+            'Use faster method to find devices (psutil)? ')), y, 0)
+        grid.addWidget(psut_checkbox, y,1)
         y += 1
 
         vbox.addStretch()
