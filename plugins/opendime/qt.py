@@ -32,6 +32,7 @@ import requests
 import sip
 import copy
 import threading
+import time
 
 import webbrowser
 
@@ -42,6 +43,7 @@ from electrum.i18n import _
 
 from electrum_gui.qt.util import EnterButton, WindowModalDialog, Buttons, MONOSPACE_FONT
 from electrum_gui.qt.util import OkButton, CloseButton, MyTreeWidget, ThreadedButton
+from electrum_gui.qt.util import WaitingDialog
 from electrum_gui.qt.qrcodewidget import QRCodeWidget
 from electrum_gui.qt.address_dialog import AddressDialog
 from electrum_gui.qt.main_window import ElectrumWindow
@@ -54,13 +56,16 @@ from functools import partial
 from collections import OrderedDict
 
 from electrum.wallet import Imported_Wallet, IMPORTED_ACCOUNT
+from electrum.paymentrequest import PR_UNKNOWN
 
 from .shared import AttachedOpendime, has_libusb, has_psutil
 from . import  assets_rc
 
 from electrum.util import block_explorer_URL, PrintError
+from electrum.rsakey import getRandomBytes
 
 BACKGROUND_TXT = _('''\
+<img src=":od-plugin/od-logo.png"></img>
 <h3>Opendime&trade; Helper Plugin</h3>
 <p>
 Makes setup, loading and spending from
@@ -94,7 +99,7 @@ class OpendimeItem(QTreeWidgetItem):
 
         icon_name, status_text = self.display_status()
 
-        addr = unit.address if not unit.is_new else '  -  '
+        addr = unit.address if not unit.is_new else '-'
         super(OpendimeItem, self).__init__([status_text, addr, '' if unit.is_new else '?'])
 
         self.setChildIndicatorPolicy(QTreeWidgetItem.DontShowIndicator)
@@ -185,6 +190,14 @@ class OpendimeTransientWallet(Imported_Wallet):
     '''
         Fake wallet used to monitor balances of Opendimes that are presently connected.
     '''
+    def __init__(self, *a, **kws):
+        self.od_tab = kws.pop('od_tab')
+        super(OpendimeTransientWallet, self).__init__(*a, **kws)
+
+    @property
+    def path(self):
+        # some code paths assume we have a disk location
+        raise NotImplementedError
 
     def is_watching_only(self):
         return True
@@ -212,6 +225,15 @@ class OpendimeTransientWallet(Imported_Wallet):
         print "updates: %s" % self.history
 
         self.od_tab.more_txn_data_sig.emit()
+
+    def basename(self):
+        return 'in-memory'
+
+    def get_payment_request(self, addr, config):
+        raise NotImplementedError
+
+    def get_request_status(self, key):
+        return PR_UNKNOWN
 
 
 class OpendimeTab(QWidget):
@@ -245,8 +267,7 @@ class OpendimeTab(QWidget):
 
         # for balance tracking we need a wallet which will be an
         # 'imported' watch-only type wallet, and uses fake storage
-        self.od_wallet = OpendimeTransientWallet(InMemoryStorage())
-        self.od_wallet.od_tab = self
+        self.od_wallet = OpendimeTransientWallet(InMemoryStorage(), od_tab=self)
         self.od_wallet.start_threads(self.main_window.network)
 
         self.wallet = self.od_wallet        # other code compat.
@@ -268,6 +289,28 @@ class OpendimeTab(QWidget):
         self.build_gui()
 
         tab_bar.insertTab(idx, self, _('Opendime') )
+
+    def setup_unit(self, item):
+        # setup entropy
+        SZ = 256*1024
+        unit = item.unit
+
+        if not unit.is_new: return
+
+        def doit():
+            rnd = getRandomBytes(SZ)
+            try:
+                unit.initalize(rnd)
+            except:
+                import traceback
+                traceback.print_exc()
+
+            # wait a touch and do a re-scan. imperfect.
+            time.sleep(15)
+            self.rescan_button.clicked.emit(True)
+
+        # start the write in a thread (very slow) and show delay
+        WaitingDialog(self, _("Writing large quantity of random numbers to fresh Opendime."), doit)
 
     def table_item_menu(self, position):
         item = self.table.itemAt(position)
@@ -297,7 +340,7 @@ class OpendimeTab(QWidget):
         needs_wall = set()
 
         if unit.is_new:
-            menu.addAction(_("Pick key now (initialize)"), lambda: self.setup_unit(unit))
+            menu.addAction(_("Pick key now (initialize)"), lambda: self.setup_unit(item))
 
         else:
             addr = unit.address
@@ -405,7 +448,7 @@ class OpendimeTab(QWidget):
         '''
 
         grid = QGridLayout(self)
-        grid.setHorizontalSpacing(30)
+        grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(0)
         #grid.setColumnStretch(3, 1)
 
@@ -423,9 +466,10 @@ class OpendimeTab(QWidget):
 
         # addItem(QLayoutItem *item, row, column, rowSpan=1, columnSpan = 1, alignment = 0)
 
-        # second column: 2 rows: button + status
-        self.rescan_button = ThreadedButton(_('Rescan Now'), self.rescan_now)
-        self.rescan_button.setIcon(QIcon(":od-plugin/rescan-icon.png"))
+        # second column: button 
+        self.rescan_button = ThreadedButton(_('Find Opendime(s)'), self.rescan_now)
+        self.rescan_button.setMinimumHeight(50)
+        self.rescan_button.setMinimumWidth(200)
         grid.addWidget(self.rescan_button, 0, 1, alignment=Qt.AlignCenter)
 
         # Note: these column headers have already been translated elsewhere in project.
@@ -509,7 +553,7 @@ class OpendimeTab(QWidget):
 		# HistoryWidget which makes the same assumptions and so on.
 
         # This list was created by exploring the UI... imperfect.
-        flds = ['show_transaction', 'app', 'config', 'format_amount', 'show_qr']
+        flds = ['show_transaction', 'app', 'config', 'format_amount', 'show_qrcode']
 
         for fn in flds:
             setattr(self, fn, getattr(self.main_window, fn))
@@ -633,11 +677,11 @@ class Plugin(BasePlugin):
             chkbox.setChecked(forced_state)
 
             if forced_state:
-                msg = '''This feature is enabled if suitable python modules are 
-installed and there is no reason to disable it.'''
+                msg = '''This feature is enabled if suitable python modules are '''+\
+                            '''installed and there is no reason to disable it.'''
             else:
-                msg = '''Please try: "sudo pip install psutil pyusb" 
-... and then restart Electrum'''
+                msg = '''Please try: "sudo pip install psutil pyusb" '''+\
+                            '''... and then restart Electrum'''
 
             window.show_message(msg)
 
@@ -652,7 +696,6 @@ installed and there is no reason to disable it.'''
 
         psut_checkbox = QCheckBox()
         psut_checkbox.setChecked(has_psutil)
-        psut_checkbox.stateChanged.connect(on_change_check)
         psut_checkbox.stateChanged.connect(lambda x: on_change_check(psut_checkbox, has_psutil))
 
         grid.addWidget(QLabel(_(

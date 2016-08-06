@@ -300,7 +300,7 @@ class AttachedOpendime(object):
 
     @property
     def address(self):
-        return self.variables.get('ad', 'TBD').strip()
+        return self.variables.get('ad', None).strip()
 
     @property
     def serial(self):
@@ -325,6 +325,16 @@ class AttachedOpendime(object):
 
     def __repr__(self):
         return "<OPENDIME @ %s>" % self.root_path
+
+    def initalize(self, entropy):
+        '''
+            Take a factory-fresh unit and load with entropy. Will eject itself.
+        '''
+        assert self.is_new
+        assert len(entropy) >= 256*1024, "Need at least 256k of data"
+
+        fn = os.path.join(self.root_path, 'whatever.bin')
+        file(fn, 'wb').write(entropy)
         
 
 def test_macos():
