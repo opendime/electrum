@@ -511,6 +511,8 @@ class OpendimeTab(QWidget):
 
         hp_link = QLabel('<center><a href="https://opendime.com/electrum">opendime.com</a>')
         hp_link.openExternalLinks = True
+        hp_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        hp_link.linkActivated.connect(lambda link: webbrowser.open(link))
         grid.addWidget(hp_link, 1, 0)
 
         grid.setColumnStretch(1, 100)
@@ -705,6 +707,8 @@ class Plugin(BasePlugin):
         vbox = QVBoxLayout(d)
         blurb = QLabel(BACKGROUND_TXT)
         blurb.openExternalLinks = True
+        blurb.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        blurb.linkActivated.connect(lambda link: webbrowser.open(link))
         vbox.addWidget(blurb)
 
         grid = QGridLayout()
