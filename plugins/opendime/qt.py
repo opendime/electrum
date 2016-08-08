@@ -113,6 +113,9 @@ class OpendimeItem(QTreeWidgetItem):
         if not unit.is_new and not unit.is_sealed:
             # Show "unsealed" state with special background, since kinda important to 
             # sweep as soon as possible... and not deposit more, etc.
+            pass
+
+        if unit.problem:
             hilite = QBrush(Qt.red, Qt.FDiagPattern)
             for col in range(self.columnCount()):
                 self.setBackground(col, hilite)
@@ -364,6 +367,12 @@ class OpendimeTab(QWidget):
             a.setEnabled(False)
             menu.addSeparator()
 
+            # Do not allow them to do anything foolish with a bogus unit...
+            # Disable entire menu! Problem: hard to clear popup but can by
+            # switching windows.
+            menu.setEnabled(False)
+
+
         needs_wall = set()
 
         if unit.is_new:
@@ -373,8 +382,13 @@ class OpendimeTab(QWidget):
             addr = unit.address
 
             # Show address as a kinda header on menu
+            if unit.verify_level:
+                a = menu.addAction(u"\u2713 Verified (level %d)" % unit.verify_level, lambda: None)
+                a.setEnabled(False)
+
             a = menu.addAction(unit.address, lambda: None)
             a.setEnabled(False)
+
             menu.addSeparator()
 
             app = QApplication.instance()
@@ -434,7 +448,7 @@ class OpendimeTab(QWidget):
         menu.addSeparator()
         menu.addAction(_("View Opendime page (local HTML)"), 
             lambda: webbrowser.open('file:'+os.path.join(unit.root_path, 'index.htm')))
-        menu.addAction(_("Reveal Opendime files"), 
+        menu.addAction(_("Open Opendime folder (local)"), 
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(unit.root_path)))
 
         menu.exec_(self.table.viewport().mapToGlobal(position))
