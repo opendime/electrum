@@ -578,7 +578,6 @@ class OpendimeTab(QWidget):
             transition, but for now, they do not have same serial, so this code
             only used during unseal.)
         '''
-        print "Changed: %r" % unit
         sn = unit.serial
         assert sn in self.attached
 
