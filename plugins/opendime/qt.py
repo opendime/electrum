@@ -244,6 +244,7 @@ class OpendimeTab(QWidget):
 
     # signals for slotting
     new_unit_sig = pyqtSignal(AttachedOpendime)
+    unit_updated_sig = pyqtSignal(AttachedOpendime)
     scan_done_sig = pyqtSignal(list)
 
     more_txn_data_sig = pyqtSignal()
@@ -282,11 +283,11 @@ class OpendimeTab(QWidget):
         idx = tab_bar.count() - 1
 
         # these will be OpendimeItem instances, in display order, key is serial number
-        # table items (Qt widgets)
         self.attached = OrderedDict()
 
         # connect slots
         self.new_unit_sig.connect(self.on_new_unit)
+        self.unit_updated_sig.connect(self.on_unit_updated)
         self.scan_done_sig.connect(self.on_scan_done)
         self.more_txn_data_sig.connect(self.on_more_txn_data)
 
@@ -472,11 +473,18 @@ class OpendimeTab(QWidget):
             for pn in paths:
                 unit = AttachedOpendime(pn)
                 found.append(unit)
+
                 if unit.serial not in self.attached:
                     new.append(unit)
                     unit.verify_wrapped()
 
                     self.new_unit_sig.emit(unit)
+                else:
+                    ex = self.attached[unit.serial].unit
+
+                    if unit.is_new != ex.is_new or unit.is_sealed != ex.is_sealed:
+                        unit.verify_wrapped()
+                        self.unit_updated_sig.emit(unit)
 
             msg = None
             if new:
@@ -561,6 +569,28 @@ class OpendimeTab(QWidget):
 
             item.update_balance(*bal, formatter=self.main_window.format_amount)
 
+
+    def on_unit_updated(self, unit):
+        '''
+            Exisiting opendime changed; probably a sealed=>unsealed transition.
+
+            (Plan is future units will have a defined serial number from new->ready
+            transition, but for now, they do not have same serial, so this code
+            only used during unseal.)
+        '''
+        print "Changed: %r" % unit
+        sn = unit.serial
+        assert sn in self.attached
+
+        item = OpendimeItem(unit)
+        existing = self.attached.pop(sn)
+
+        sip.delete(existing)
+        self.table.addChild(item)
+        self.attached[sn] = item
+
+        if not unit.is_new:
+            self.od_wallet.import_address(unit.address)
 
     def on_new_unit(self, unit):
         '''
