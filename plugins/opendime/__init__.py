@@ -4,7 +4,7 @@ fullname = 'Opendime Helper'
 
 description = _('Simplify and streamline access to connected Opendime devices')
 
-available_for = ['qt', 'cmdline' ]
+available_for = ['qt', ]
 
 # NOTE: We don't **require** it, but if libusb is available to use, then we can
 # perform more checks into the authenticity of the attached Opendime.
