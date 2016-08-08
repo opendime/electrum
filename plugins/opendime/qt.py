@@ -111,7 +111,7 @@ class OpendimeItem(QTreeWidgetItem):
         self.serial = unit.serial
 
         if not unit.is_new and not unit.is_sealed:
-            # Show "unsealed" state with special background, since kinda important to 
+            # Show "unsealed" state with special background, since kinda important to
             # sweep as soon as possible... and not deposit more, etc.
             pass
 
@@ -164,7 +164,7 @@ class OpendimeItem(QTreeWidgetItem):
 class InMemoryStorage(PrintError):
     '''
         Replacement for lib/wallet.Storage object which will only
-        store things in memory during operation. We don't need/want to 
+        store things in memory during operation. We don't need/want to
         remember anything about Opendimes we have seen in the past.
     '''
 
@@ -404,7 +404,7 @@ class OpendimeTab(QWidget):
                                             lambda: self.import_privkey(unit))
                     needs_wall.add(a)
 
-                menu.addAction(_("Copy private key to clipboard"), 
+                menu.addAction(_("Copy private key to clipboard"),
                                 lambda: app.clipboard().setText(unit.privkey))
 
                 menu.addSeparator()
@@ -424,12 +424,12 @@ class OpendimeTab(QWidget):
             # as a full wallet, see Wallet.from_address() and Wallet.from_private_key()
             # Probably a bad idea and too obscure otherwise.
 
-            menu.addAction(_("Copy address to clipboard"), 
+            menu.addAction(_("Copy address to clipboard"),
                                 lambda: app.clipboard().setText(unit.address))
 
             menu.addAction(_("Show as QR code"),
                 lambda: self.main_window.show_qrcode(addr, 'Opendime', parent=self))
-    
+
 
             # kinda words, but if they hit "next" goes to their wallet, etc.
             #menu.addAction(_("Request payment"), lambda: self.main_window.receive_at(addr))
@@ -446,9 +446,9 @@ class OpendimeTab(QWidget):
                     a.setEnabled(False)
 
         menu.addSeparator()
-        menu.addAction(_("View Opendime page (local HTML)"), 
+        menu.addAction(_("View Opendime page (local HTML)"),
             lambda: webbrowser.open('file:'+os.path.join(unit.root_path, 'index.htm')))
-        menu.addAction(_("Open Opendime folder (local)"), 
+        menu.addAction(_("Open Opendime folder (local)"),
             lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(unit.root_path)))
 
         menu.exec_(self.table.viewport().mapToGlobal(position))
@@ -519,7 +519,7 @@ class OpendimeTab(QWidget):
 
         # addItem(QLayoutItem *item, row, column, rowSpan=1, columnSpan = 1, alignment = 0)
 
-        # second column: button 
+        # second column: button
         self.rescan_button = ThreadedButton(_('Find Opendime(s)'), self.rescan_now)
         self.rescan_button.setMinimumHeight(50)
         self.rescan_button.setMinimumWidth(200)
@@ -612,7 +612,7 @@ class OpendimeTab(QWidget):
             setattr(self, fn, getattr(self.main_window, fn))
 
         d = AddressDialog(self, addr)
-        d.exec_() 
+        d.exec_()
 
     def remove_gui(self):
         '''

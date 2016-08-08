@@ -44,7 +44,7 @@ KNOWN_VERSIONS = {
     '1.0.0': 'd5f0a97f8d9683c08a10497eafbd443c42c322c132c637a6e477dccf1f286043',
 }
 
-# This code is taken from v1.1.0 of 
+# This code is taken from v1.1.0 of
 #   pycode.zip/trust_me.py
 # as shipped on Opendime units, with some minor changes.
 #
@@ -109,13 +109,13 @@ Low level USB details do not match the values observed at the filesystem level!'
                 break
             except usb.core.USBError:
                 time.sleep(.010)
-    
+
         ok = verify_message(addr, sig, msg)
         if not ok:
             fail("Incorrect signature on verification message!")
 
         #print("  - (#%d) signed message ok: %s ~ %s" % (i+1, msg[0:8], msg[-8:]))
-        
+
 
 
 class AttachedOpendime(object):
@@ -184,7 +184,7 @@ class AttachedOpendime(object):
             #   take on... 'msdos' on Mac, but maybe 'fat12' on Windows?
             return [p.mountpoint for p in psutil.disk_partitions() if
                         p.fstype.lower() not in ('ntfs', 'hfs')]
-        
+
         # fallback code here... for when psutils not installed
 
         if os.name == 'posix':
@@ -219,11 +219,11 @@ class AttachedOpendime(object):
 
         if mounts is None:
             mounts = cls.get_mountpoints()
-        
+
         return [p for p in mounts if cls.probe_opendime(p)]
 
     def verify_wrapped(self):
-        # wrapper 
+        # wrapper
         try:
             self.verify()
             self.problem = None
@@ -273,7 +273,7 @@ class AttachedOpendime(object):
                 signature = b64decode(signature.encode('utf8'))
             elif item == 2:
                 fn = self.make_fname('advanced', 'verify.txt')
-                lines = filter(None, (i.strip() for i in file(fn).readlines() 
+                lines = filter(None, (i.strip() for i in file(fn).readlines()
                                                 if not i.startswith('-----')))
                 msg = '\r\n'.join(lines[0:-2])
                 addr = lines[-2]
@@ -292,7 +292,7 @@ class AttachedOpendime(object):
         if has_libusb:
             lowlevel_verify(self.root_path, self.address, self.version)
             self.verify_level += 5
-        
+
 
     @property
     def is_sealed(self):
@@ -336,7 +336,7 @@ class AttachedOpendime(object):
 
         fn = os.path.join(self.root_path, 'whatever.bin')
         file(fn, 'wb').write(entropy)
-        
+
 
 def test_macos():
 
