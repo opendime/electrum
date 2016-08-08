@@ -195,15 +195,21 @@ class AttachedOpendime(object):
 
             dirs = []
             for home in homes:
-                for _,dn,_ in os.walk(home):
-                    for dn in dirs:
-                        dirs.append(home+'/'+dn)
-                    break
+                try:
+                    here = os.listdir(home)
+                except:
+                    continue
+
+                for dn in here:
+                    fp = home + '/' + dn
+                    if os.path.isdir(fp):
+                        dirs.append(fp)
 
             return dirs
 
         elif sys.platform.startswith('win'):
             # Just a random assortment of drive letters?
+            # XXX untested.
             return ['\\\\%s\\'%chr(i+65) for i in range(26)]
 
         else:
