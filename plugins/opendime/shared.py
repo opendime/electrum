@@ -253,7 +253,7 @@ class AttachedOpendime(object):
                 assert g.f_frsize == 512
                 assert g.f_blocks in (2847, 2880)
             except AssertionError:
-                raise AssertionError("os.statvfs didn't shown correct disk geometry")
+                raise AssertionError("os.statvfs didn't show correct disk geometry")
 
             self.verify_level += 1
 
@@ -273,10 +273,11 @@ class AttachedOpendime(object):
                 signature = b64decode(signature.encode('utf8'))
             elif item == 2:
                 fn = self.make_fname('advanced', 'verify.txt')
-                lines = file(fn).readlines()
-                msg = lines[1] + lines[2].strip()
-                addr = lines[4].strip()
-                signature = lines[5]
+                lines = filter(None, (i.strip() for i in file(fn).readlines() 
+                                                if not i.startswith('-----')))
+                msg = '\r\n'.join(lines[0:-2])
+                addr = lines[-2]
+                signature = lines[-1]
                 signature = b64decode(signature.encode('utf8'))
 
             assert addr == self.address, "Signature was copied from some other Opendime!"

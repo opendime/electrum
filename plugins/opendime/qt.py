@@ -24,15 +24,9 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import base64
-import urllib
-import sys
-import os
-import requests
+import os, sys, copy, time, traceback
 import sip
-import copy
 import threading
-import time
 
 import webbrowser
 
@@ -50,8 +44,8 @@ from electrum_gui.qt.main_window import ElectrumWindow
 from PyQt4.Qt import QVBoxLayout, QHBoxLayout, QWidget, QPixmap, QTreeWidgetItem, QIcon
 from PyQt4.Qt import QGridLayout, QPushButton, QCheckBox, QLabel, QMenu, QFont, QSize
 from PyQt4.Qt import QDesktopServices, QUrl, QHeaderView, QFrame, QFontMetrics, QSpacerItem
+from PyQt4.Qt import Qt, QBrush
 from PyQt4.QtCore import pyqtSignal
-from PyQt4.Qt import Qt
 from functools import partial
 from collections import OrderedDict
 
@@ -95,7 +89,7 @@ class OpendimeItem(QTreeWidgetItem):
         '''
         self.unit = unit
 
-        print "New OD: %r" % unit
+        #print "New OD: %r" % unit
 
         icon_name, status_text = self.display_status()
 
@@ -115,6 +109,13 @@ class OpendimeItem(QTreeWidgetItem):
 
         # key value used for UID
         self.serial = unit.serial
+
+        if not unit.is_new and not unit.is_sealed:
+            # Show "unsealed" state with special background, since kinda important to 
+            # sweep as soon as possible... and not deposit more, etc.
+            hilite = QBrush(Qt.red, Qt.FDiagPattern)
+            for col in range(self.columnCount()):
+                self.setBackground(col, hilite)
 
     def display_status(self):
         '''
@@ -222,7 +223,7 @@ class OpendimeTransientWallet(Imported_Wallet):
         # need an event to know when changes/results are known
         super(OpendimeTransientWallet, self).save_transactions(write)
 
-        print "updates: %s" % self.history
+        #print "updates: %s" % self.history
 
         self.od_tab.more_txn_data_sig.emit()
 
@@ -290,10 +291,9 @@ class OpendimeTab(QWidget):
 
         tab_bar.insertTab(idx, self, _('Opendime') )
 
-    def setup_unit(self, item):
+    def setup_unit(self, unit):
         # setup entropy
         SZ = 256*1024
-        unit = item.unit
 
         if not unit.is_new: return
 
@@ -302,15 +302,42 @@ class OpendimeTab(QWidget):
             try:
                 unit.initalize(rnd)
             except:
-                import traceback
-                traceback.print_exc()
+                # I expect errors here depending on OS and timing and such... ignore
+                traceback.print_exc(file=sys.stdout)
 
             # wait a touch and do a re-scan. imperfect.
             time.sleep(15)
             self.rescan_button.clicked.emit(True)
 
         # start the write in a thread (very slow) and show delay
-        WaitingDialog(self, _("Writing large quantity of random numbers to fresh Opendime."), doit)
+        WaitingDialog(self, _("Writing large quantity of random numbers to this Opendime. Please wait."), doit)
+
+    def import_privkey(self, unit):
+        # Adds private key from opendime into current wallet, but does not sweep funds!
+        # Since most wallets are deterministic, this won't work for most, and is not
+        # offered in the menu unless it might work.
+        try:
+            assert not unit.is_sealed
+            assert not unit.is_new
+            assert not unit.privkey
+            assert self.real_wallet.can_import()
+
+            chk_addr = self.real_wallet.import_key(unit.privkey, None)
+        except:
+            traceback.print_exc(file=sys.stdout)
+            self.show_critical(_("Could not be import key!"))
+            return
+
+        assert chk_addr == unit.address
+
+        self.show_message(_("Opendime was added to your wallet: ") + chk_addr)
+
+        self.main_window.address_list.update()
+        self.main_window.history_list.update()
+
+    def sweep_value(self, unit):
+        # use existing interaction
+        self.main_window.sweep_key_dialog(prefilled_privkey = unit.privkey)
 
     def table_item_menu(self, position):
         item = self.table.itemAt(position)
@@ -340,12 +367,12 @@ class OpendimeTab(QWidget):
         needs_wall = set()
 
         if unit.is_new:
-            menu.addAction(_("Pick key now (initialize)"), lambda: self.setup_unit(item))
+            menu.addAction(_("Initalize with random key"), lambda: self.setup_unit(unit))
 
         else:
             addr = unit.address
 
-            # adding a kinda header to menu
+            # Show address as a kinda header on menu
             a = menu.addAction(unit.address, lambda: None)
             a.setEnabled(False)
             menu.addSeparator()
@@ -353,25 +380,37 @@ class OpendimeTab(QWidget):
             app = QApplication.instance()
 
             if not unit.is_sealed:
-                a = menu.addAction(_("Import private key into Electrum"),
-                                        lambda: self.import_value(unit))
-                needs_wall.add(a)
-
+                # Most people should use this....
                 a = menu.addAction(_("Sweep funds (one time)"), lambda: self.sweep_value(unit))
                 needs_wall.add(a)
 
+                if self.real_wallet.can_import():
+                    # BIP32 wallets cannot import, so most will never see this option.
+                    a = menu.addAction(_("Import private key into Electrum (advanced)"),
+                                            lambda: self.import_privkey(unit))
+                    needs_wall.add(a)
+
+                menu.addAction(_("Copy private key to clipboard"), 
+                                lambda: app.clipboard().setText(unit.privkey))
+
                 menu.addSeparator()
             else:
-                a = menu.addAction(_("Pay to..."),
+                a = menu.addAction(_("Pay to this Opendime..."),
                                         lambda: self.main_window.pay_to_URI('bitcoin:'+addr))
                 needs_wall.add(a)
+
+                # TODO: allow watch of sealed opendime
+                #   if self.real_wallet.can_import():
+                #       menu.addAction(_("Import address into Electrum (watch only)"),
+                #                            lambda: self.import_for_watch(unit))
+
                 menu.addSeparator()
 
             # Maybe todo: could open as a new wallet; either watch-only or if unsealed,
             # as a full wallet, see Wallet.from_address() and Wallet.from_private_key()
             # Probably a bad idea and too obscure otherwise.
 
-            menu.addAction(_("Copy to address clipboard"), 
+            menu.addAction(_("Copy address to clipboard"), 
                                 lambda: app.clipboard().setText(unit.address))
 
             menu.addAction(_("Show as QR code"),
@@ -439,7 +478,7 @@ class OpendimeTab(QWidget):
 
 
         except Exception, e:
-            print str(e)
+            traceback.print_exc(file=sys.stdout)
 
 
     def build_gui(self):
